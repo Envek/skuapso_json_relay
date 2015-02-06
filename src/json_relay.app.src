@@ -1,0 +1,15 @@
+{application, json_relay,
+ [
+  {description, "JSON HTTP relay module for Skuapso"},
+  {vsn, "0.1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { json_relay, []}},
+  {env, [
+    {url, []},
+    {weight, 5}
+  ]}
+ ]}.

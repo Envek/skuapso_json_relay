@@ -1,0 +1,9 @@
+.eunit
+lib
+*.o
+*.beam
+*.app
+*.plt
+erl_crash.dump
+ebin
+.rebar
