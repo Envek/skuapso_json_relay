@@ -33,6 +33,7 @@ start(_StartType, _StartArgs) ->
     ?MODULE:start_link().
 
 stop(_State) ->
+    '_info'("JSON Relay stopped."),
     ok.
 
 
@@ -53,6 +54,7 @@ init(Opts) ->
     HooksWeight = misc:get_env(?MODULE, weight, Opts),
     hooks:install({terminal, packet}, HooksWeight, {?MODULE, packet}, [terminal]),
     ok = inets:start(),
+    ok = ssl:start(),
     '_notice'("json_relay is going to send something to ~s, opts is ~p", [URI, Opts]),
     {ok, { {one_for_one, 5, 10}, []} }.
 
@@ -61,42 +63,38 @@ init(Opts) ->
 %% Hooks callbacks
 %% ===================================================================
 
-%% Вызывается, когда прибывает пакет с координатами, формирует JSON и POST'ит его.
-packet(terminal, _Pid, _Terminal, Packet, _Timeout) ->
-  '_debug'("Called packet with pid, terminal, packet, timeout: ~p, ~p, ~p", [_Pid, _Terminal, Packet, _Timeout]),
+%% Вызывается, когда прибывает пакет с координатами
+packet(terminal, Pid, {_Protocol, Uin} = Terminal, Packet, Timeout) ->
+  '_debug'("Called packet with pid, terminal, packet, timeout: ~p, ~p, ~p, ~p", [Pid, Terminal, Packet, Timeout]),
   Eventtime = case maps:get(eventtime, Packet, undefined) of
                 undefined -> erlang:universaltime();
                 ET -> ET
               end,
-  FullPacket = Packet#{eventtime => Eventtime},
-  PacketJSON = json_enc(maps:without([raw], FullPacket)),
+  FullPacket = Packet#{eventtime => Eventtime, imei => Uin},
+  send_json(FullPacket).
+
+% формирует JSON и POST'ит его
+send_json(Packet) ->
+  PacketJSON = misc:to_json(maps:without([raw], Packet)),
   URI = misc:get_env(?MODULE, url, []),
-  case hooks:get(raw_id) of
-    undefined -> stop;
-    _RawId ->
-      '_trace'("About to send packet to <~s>, content: ~ts", [URI, PacketJSON]),
-      case httpc:request(post, {URI, [{"Accept", "*/*"}], "application/json", PacketJSON}, [], []) of
-        {ok, Result} -> '_trace'("Successfully sent data with result: ~p", [Result]);
-        {error, Reason} -> '_trace'("Something went wrong: ~p", [Reason])
+  '_debug'("Sending packet to <~s>, content: ~s", [URI, PacketJSON]),
+  case httpc:request(post, {URI, [{"Accept", "*/*"}], "application/json", PacketJSON}, [], []) of
+    {ok, Result} ->
+      {{_, StatusCode, _StatusText}, _Headers, Body} = Result,
+      Success = StatusCode div 100 =:= 2, % Only 2xx HTTP codes are good
+      case {Success, StatusCode} of
+        {true, _}    -> '_debug'("Successfully sent data with result: ~p", [Result]);
+        {false, 422} -> % 422 means "Your data is semantically invalid!"
+          '_warning'("Server didn't accept data saying: ~s", [Body]);
+        {false, 503} -> % Service Unavailable, usually means "We are deploying now (or in another maintenance), try later"
+          % TODO: Postpone data sending for some time
+          '_warning'("Server ~s currently not available, try later!", [URI]);
+        {false, _}   -> % We didn't expect that, ignore
+          '_warning'("Server responded inexpectedly: ~p", [Result])
+      end;
+    {error, Reason} ->
+      case Reason of
+        % econnrefused and etimedout are both there
+        {failed_connect, Details} -> '_warning'("Can't connect to server: ~p", [Details])
       end
   end.
-
-
-%% Different copy-pasted things. TODO: Move it somewhere
-
-json_enc(L) ->
-  L1 = pre_json(L),
-  case catch jsxn:encode(L1) of
-    {'EXIT', {badarg, _}} -> '_warning'("can't transform to json: ~w", [L1]), <<"{}">>;
-    {'EXIT', Reason} -> '_warning'("jsx failed transform ~w: ~w", [L1, Reason]), <<"{}">>;
-    E -> E
-  end.
-
-pre_json(Map) ->
-  maps:map(
-    fun(_, V) when is_map(V) -> pre_json(V);
-       (LL, {G, M}) when LL =:= latitude; LL =:= longitude ->
-        #{d => G, m => M};
-       (_, V) -> V
-    end,
-    Map).
